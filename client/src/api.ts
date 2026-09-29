@@ -64,10 +64,15 @@ export const api = {
       body: JSON.stringify({ mapping }),
     });
   },
-  commit(id: number, mapping: { from: number; to: number }[]) {
+  /** 工作台确认：必须携带预览返回的一次性凭证 ticket */
+  commit(
+    id: number,
+    mapping: { from: number; to: number }[],
+    ticket: string,
+  ) {
     return request<CommitResult>(`/api/documents/${id}/renumber/commit`, {
       method: 'POST',
-      body: JSON.stringify({ mapping }),
+      body: JSON.stringify({ mapping, ticket }),
     });
   },
   undo(id: number) {

@@ -11,6 +11,9 @@ import {
   listDocuments,
   commitRenumber,
   undoLastRenumber,
+  createRenumberPreview,
+  commitRenumberWithTicket,
+  PreviewTicketError,
 } from './db';
 import { analyzeText, toAnalyzeDTO } from './parser';
 import { buildPlan, normalizeMapping, type ConflictError, type RawRow } from './renumber';
@@ -149,26 +152,71 @@ app.put('/api/documents/:id', (req, res) => {
   res.json({ document: doc, analysis: analysisOf(doc.content) });
 });
 
-// 逐处变更预览（只读）。
+// 逐处变更预览（只读）。返回一次性确认凭证 ticket，绑定当前已保存正文的
+// 单调修订号 revision 与本次规范化映射；正文被保存/提交/裁撤/撤销推进，
+// 或用户修改映射后，旧凭证立即失效（映射不符 / revision 不符都会被拒绝）。
 app.post('/api/documents/:id/renumber/preview', (req, res) => {
   const id = Number(req.params.id);
   const doc = requireDoc(res, id);
   if (!doc) return;
   const planned = planOrConflict(res, doc.content, req.body?.mapping);
   if (!planned) return;
+  const changeCount = planned.plan.changes!.length;
+  const ticket = createRenumberPreview(doc.id, doc.revision, planned.entries, changeCount);
   res.json({
     mapping: planned.entries,
-    changeCount: planned.plan.changes!.length,
+    changeCount,
     changes: planned.plan.changes,
     previewText: planned.plan.newText,
+    revision: doc.revision,
+    ticket: ticket.token,
   });
 });
 
-// 确认提交：历史与正文在同一 SQLite 事务中原子落库。
+// 确认提交。
+//   - 工作台：请求体带 ticket（预览返回的一次性凭证）。服务端在同一 IMMEDIATE
+//     事务内核对凭证是否存在、是否已消费、revision 是否仍为当前值、映射是否与
+//     预览时一致，并按当前正文重算计划；全部通过后消费凭证、写撤销历史、更新正文。
+//     凭证过期 / 映射不符 / 重复确认均以 409 拒绝（两个写入均不发生），提示重新预览。
+//   - 不带 ticket 的旧请求：仍按原有校验、响应与撤销规则工作（兼容旧调用方）。
 app.post('/api/documents/:id/renumber/commit', (req, res) => {
   const id = Number(req.params.id);
   const doc = requireDoc(res, id);
   if (!doc) return;
+
+  const rawTicket = (req.body as { ticket?: unknown } | null | undefined)?.ticket;
+  const hasTicket = typeof rawTicket === 'string' && rawTicket.length > 0;
+
+  if (hasTicket) {
+    // 工作台凭证路径：映射形态先做与旧路径一致的规范化校验；
+    // 凭证本身的核对（revision / 映射一致性 / 一次性）全部在事务内完成。
+    const { entries, errors } = normalizeMapping(
+      ((req.body as { mapping?: unknown } | null)?.mapping as RawRow[]) ?? [],
+    );
+    if (errors.length > 0) {
+      return fail(res, 409, 'PREVIEW_MAPPING_MISMATCH', '映射未通过校验，请修改映射后重新生成预览。', {
+        conflicts: errors,
+      });
+    }
+    try {
+      const result = commitRenumberWithTicket(id, rawTicket as string, entries);
+      return res.json({
+        document: result.doc,
+        mapping: result.entries,
+        changeCount: result.changes.length,
+        changes: result.changes,
+        revision: result.revision,
+        analysis: analysisOf(result.doc.content),
+      });
+    } catch (e) {
+      if (e instanceof PreviewTicketError) {
+        return fail(res, 409, e.code, e.message);
+      }
+      throw e;
+    }
+  }
+
+  // 兼容路径：不带凭证，沿用原有校验、响应与撤销规则。
   const planned = planOrConflict(res, doc.content, req.body?.mapping);
   if (!planned) return;
   const { entries, plan } = planned;
@@ -187,6 +235,7 @@ app.post('/api/documents/:id/renumber/commit', (req, res) => {
     mapping: entries,
     changeCount: plan.changes!.length,
     changes: plan.changes,
+    revision: updated.revision,
     analysis: analysisOf(updated.content),
   });
 });

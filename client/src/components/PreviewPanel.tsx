@@ -19,7 +19,10 @@ export default function PreviewPanel({ preview }: { preview: PreviewResult }) {
     <section className="card">
       <h3>逐处变更预览（{preview.changeCount} 处）</h3>
       <p className="muted small">
-        以下为全部待写入的改动。确认提交前不会改动任何内容；提交时标题与正文引用在同一数据库事务中原子更新。
+        以下为全部待写入的改动。确认提交前不会改动任何内容；本预览已绑定当前正文修订号
+        <strong> #{preview.revision}</strong> 与本次映射的一次性凭证，修改映射或正文被保存 /
+        提交 / 裁撤 / 撤销后凭证立即失效，需要重新预览。提交时服务端在同一数据库事务内核验凭证、
+        写入撤销历史并原子更新正文，同一预览至多确认成功一次。
       </p>
 
       <div className="change-groups">

@@ -5,6 +5,13 @@
 同步**条款标题与正文引用。支持交换、环形改号以及 1/10 等前缀相近编号；检测到冲突时**拒绝写入**
 并给出冲突位置。
 
+预览会返回一张绑定**当前已保存正文单调修订号（revision）与本次映射**的**一次性确认凭证
+（ticket）**：工作台确认改号必须回传凭证；服务端在同一事务内核验凭证对应的修订号与映射后才写
+正文与撤销历史，凭证过期（正文被保存 / 提交改号 / 提交裁撤 / 撤销推进过修订号——即使正文恢复
+为相同文本，修订号也不回退）或映射不符一律拒绝并提示重新预览，两个写入均不发生；并发确认同一
+预览**至多成功一次**。用户修改映射后旧预览立即失效。不带凭证的旧版改号提交请求仍按原有校验、
+响应与撤销规则工作。
+
 此外支持**条款裁撤**：勾选一个或多个已定义条款，系统按标题边界识别各条款正文、构建条款引用图，
 列出直接引用待删条款的位置及沿引用链传递受影响的条款；提交前每个指向待删条款的引用都必须映射到
 一个**未删除**条款，无引用的待删条款可直接裁撤。确认后同样在**单个 SQLite 事务**中更新正文与
@@ -51,9 +58,15 @@ docker compose up --build
 4. **条款摘录（可选，只读）**：见下节“条款摘录流程”。
 5. **版本对照（可选，只读）**：见下节“版本对照流程”。
 6. **改号映射（可选）**：每行填写旧编号与新编号（正整数）。可点按钮快速生成“交换”或“环形改号”。
-7. **生成预览**：逐处列出“标题/引用、行列位置、改动前后、上下文”，并可展开查看高亮后的全文。
-8. **确认提交**：后端再次校验，通过后在一个事务内写入撤销历史并更新正文，保证原子性。
+7. **生成预览**：逐处列出“标题/引用、行列位置、改动前后、上下文”，并可展开查看高亮后的全文；
+   响应同时返回绑定**当前正文修订号 + 本次映射**的一次性凭证 `ticket`（及 `revision`）。
+   一旦修改映射，工作台中的旧预览立即作废，需重新生成。
+8. **确认提交**：工作台必须回传预览凭证；服务端在**同一个 IMMEDIATE 事务**内核对凭证是否存在、
+   是否已消费、修订号是否仍为当前值、映射是否与预览时一致，并按当前正文重算计划，全部通过后才
+   消费凭证、写入撤销历史并更新正文。凭证过期或映射不符返回 409 并提示重新预览，**两个写入均不
+   发生**；同一预览被并发确认时至多成功一次。（不带凭证的旧版提交接口仍兼容，见下节。）
 9. **撤销 / 导出**：撤销最近一次操作（恢复操作前正文并弹出历史栈顶）；导出当前文本为 `.txt`。
+   保存原文、提交改号 / 裁撤、撤销都会把正文修订号 +1。
 
 ## 条款摘录流程（只读）
 
@@ -203,6 +216,99 @@ curl -X POST http://localhost:3000/api/documents/1/excerpt \
 
 已在映射内部的编号互换/环形（如 1→2、2→1，或 1→2→3→1）属于合法重排，会被正确接受。
 
+## 改号预览凭证（ticket）
+
+工作台的“预览 → 确认”是一个带乐观锁的两步流程，用于避免“预览之后、确认之前正文或映射已变”
+导致的盲写：
+
+- **预览** `POST /api/documents/:id/renumber/preview` 不写正文，只生成一张凭证，响应新增：
+  - `revision`：生成预览时已保存正文的单调修订号；
+  - `ticket`：一次性确认凭证（随机 256 位 token，服务端持久化）。
+- **确认** `POST /api/documents/:id/renumber/commit` 请求体在 `mapping` 之外带上 `ticket`。
+  服务端在同一个 `IMMEDIATE` SQLite 事务内依次完成：
+  1. 凭证存在且未被消费；
+  2. 凭证绑定的 `revision` 等于当前正文修订号；
+  3. 提交的映射与凭证记录的映射一致（规范化后比较，**行序无关**）；
+  4. 按当前正文重新构建改号计划（再次跑全部冲突校验）；
+  5. 条件消费凭证（`UPDATE … WHERE consumed_at IS NULL`，并发下只可能命中一次）、
+     写撤销历史、更新正文并把 `revision + 1`。
+- 任一步失败整体回滚——撤销历史与正文两个写入均不发生。
+- **修订号何时推进**：保存原文（`PUT /api/documents/:id`，即使内容逐字相同也 +1）、
+  提交改号、提交裁撤、撤销（`POST …/undo`）。因此正文后来恢复为相同文本，旧凭证也不会复活。
+- **兼容**：请求体不带 `ticket` 的旧版调用仍走原有路径——原有映射 / 冲突校验、原有响应字段、
+  原有撤销规则全部不变（提交同样推进 `revision`，响应另附 `revision` 字段）。工作台界面确认改号
+  必须使用凭证；修改映射后界面会立即丢弃旧预览，确认按钮在重新预览前不可用。
+
+### 凭证相关拒绝（HTTP 409，两个写入均不发生）
+
+| code | 触发情形 |
+| --- | --- |
+| `PREVIEW_NOT_FOUND` | 凭证不存在（未预览、已随文档删除或 token 错误） |
+| `PREVIEW_EXPIRED` | 凭证已被确认过（含并发重复确认），或其 `revision` 已落后于当前正文修订号 |
+| `PREVIEW_MAPPING_MISMATCH` | 提交映射与预览凭证记录的映射不一致、映射形态非法，或按当前正文重算计划出现冲突 |
+
+### 调用示例
+
+第一步，生成预览，记下响应里的 `ticket` 与 `revision`：
+
+```bash
+curl -s -X POST http://localhost:3000/api/documents/1/renumber/preview \
+  -H 'Content-Type: application/json' \
+  -d '{"mapping":[{"from":1,"to":2},{"from":2,"to":1}]}'
+```
+
+```json
+{
+  "mapping": [{ "from": 1, "to": 2 }, { "from": 2, "to": 1 }],
+  "changeCount": 4,
+  "changes": [ "……" ],
+  "previewText": "第二条 总则\n……",
+  "revision": 1,
+  "ticket": "9f2c4a1e7b6d4f0a8c3e5d2b9a17f604c8e0d3b2a5f7c9e1d4b6a8f0c2e5d7b9"
+}
+```
+
+第二步，工作台确认改号，原样回传 `mapping` 与 `ticket`：
+
+```bash
+curl -s -X POST http://localhost:3000/api/documents/1/renumber/commit \
+  -H 'Content-Type: application/json' \
+  -d '{"mapping":[{"from":1,"to":2},{"from":2,"to":1}],
+       "ticket":"9f2c4a1e7b6d4f0a8c3e5d2b9a17f604c8e0d3b2a5f7c9e1d4b6a8f0c2e5d7b9"}'
+```
+
+成功响应与旧版提交一致（另附 `revision`）：
+
+```json
+{
+  "document": { "id": 1, "content": "第二条 总则\n……", "revision": 2, "……": "……" },
+  "mapping": [{ "from": 1, "to": 2 }, { "from": 2, "to": 1 }],
+  "changeCount": 4,
+  "changes": [ "……" ],
+  "revision": 2,
+  "analysis": { "……": "……" }
+}
+```
+
+凭证过期 / 映射不符时的 409 响应：
+
+```json
+{
+  "error": {
+    "code": "PREVIEW_EXPIRED",
+    "message": "预览基于正文修订号 1，当前为 2（正文已被保存、提交、裁撤或撤销推进），请重新生成预览。"
+  }
+}
+```
+
+旧版调用（不带 `ticket`）无需改造，仍按原有校验、响应与撤销规则工作：
+
+```bash
+curl -X POST http://localhost:3000/api/documents/1/renumber/commit \
+  -H 'Content-Type: application/json' \
+  -d '{"mapping":[{"from":1,"to":2},{"from":2,"to":1}]}'
+```
+
 ## 配置（环境变量）
 
 | 变量 | 默认值 | 说明 |
@@ -223,8 +329,8 @@ Compose 已把 `/data` 挂载到命名卷 `contract-data`，容器重建后数�
 | GET | `/api/documents/:id` | 获取文档与最新解析 |
 | PUT | `/api/documents/:id` | 手工修改原文（清空撤销栈） |
 | POST | `/api/documents/:id/diff` | 以已保存合同为旧稿、`newContent` 为新稿做版本对照（只读，不写库） |
-| POST | `/api/documents/:id/renumber/preview` | 逐处变更预览（只读，冲突返回 409） |
-| POST | `/api/documents/:id/renumber/commit` | 原子提交改号 |
+| POST | `/api/documents/:id/renumber/preview` | 逐处变更预览（只读，冲突返回 409）；返回绑定 `revision` 与本次映射的一次性凭证 `ticket` |
+| POST | `/api/documents/:id/renumber/commit` | 原子提交改号：工作台须回传 `ticket`（凭证核对在同一事务内完成）；不带 `ticket` 的旧请求沿用原有校验/响应/撤销规则 |
 | POST | `/api/documents/:id/removal/impact` | 裁撤影响分析：引用图、直接引用与传递影响（只读） |
 | POST | `/api/documents/:id/removal/preview` | 删除区块 + 逐处替换预览（只读，冲突返回 409） |
 | POST | `/api/documents/:id/removal/commit` | 原子提交条款裁撤（与改号共用历史表/撤销入口） |
@@ -233,6 +339,10 @@ Compose 已把 `/data` 挂载到命名卷 `contract-data`，容器重建后数�
 | GET | `/api/documents/:id/export` | 导出处理后的纯文本 |
 
 提交/预览请求体：`{ "mapping": [{ "from": 1, "to": 2 }, { "from": 2, "to": 1 }] }`。
+预览响应另含 `revision`（当前正文单调修订号）与 `ticket`（一次性确认凭证）；工作台确认改号时
+请求体为 `{ "mapping": [...], "ticket": "…" }`，映射与凭证绑定的修订号 / 映射不一致即 409 拒绝
+（`PREVIEW_NOT_FOUND` / `PREVIEW_EXPIRED` / `PREVIEW_MAPPING_MISMATCH`，见上节）。文档对象的
+`revision` 在保存原文 / 提交改号 / 提交裁撤 / 撤销后 +1，只增不减。
 裁撤请求体：`{ "deletes": [1, 2], "replacements": [{ "from": 2, "to": 3 }] }`
 （`replacements` 只需包含幸存文本仍在引用的待删编号；无引用时传空数组）。
 摘录请求体：`{ "numbers": [3] }`（一个或多个已定义条款编号，自动去重）；只读，响应不含任何写入：
@@ -279,7 +389,7 @@ Compose 已把 `/data` 挂载到命名卷 `contract-data`，容器重建后数�
 │       ├── removal.ts     # 标题边界区块、引用图、影响分析、裁撤计划与冲突校验
 │       ├── excerpt.ts     # 条款摘录（只读）：递归收齐引用、循环去重、原文顺序拼接与冲突校验
 │       ├── diff.ts        # 版本对照（只读）：标题边界拆分、去编号/规范空白、两轮配对与待确认
-│       ├── db.ts          # SQLite 建表与原子事务（改号/裁撤提交 / 撤销共用）
+│       ├── db.ts          # SQLite 建表/迁移、单调修订号、预览凭证与原子事务（改号/裁撤提交 / 撤销共用）
 │       └── index.ts       # API 与静态资源服务
 └── client/                # React + TypeScript + Vite
     └── src/

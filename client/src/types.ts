@@ -44,6 +44,8 @@ export interface DocumentDTO {
   id: number;
   title: string;
   content: string;
+  /** 已保存正文的单调修订号：保存原文 / 提交改号 / 提交裁撤 / 撤销都会 +1 */
+  revision: number;
   created_at: string;
   updated_at: string;
 }
@@ -77,6 +79,10 @@ export interface PreviewResult {
   changeCount: number;
   changes: ChangeItem[];
   previewText: string;
+  /** 预览所绑定的正文修订号 */
+  revision: number;
+  /** 一次性确认凭证：工作台确认改号必须回传；修改映射或正文修订号推进后即失效 */
+  ticket: string;
 }
 
 export interface CommitResult {
@@ -84,6 +90,7 @@ export interface CommitResult {
   mapping: MappingEntry[];
   changeCount: number;
   changes: ChangeItem[];
+  revision: number;
   analysis: AnalyzeDTO;
 }
 

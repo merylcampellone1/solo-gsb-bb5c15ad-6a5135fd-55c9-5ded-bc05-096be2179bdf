@@ -142,11 +142,18 @@ export default function App() {
 
   const doCommit = async () => {
     if (!doc) return;
+    // 工作台确认改号必须使用预览凭证：修改映射后旧预览已被清空，
+    // 此处兜底拦截，避免发出不带凭证的请求。
+    if (!preview) {
+      setNotice('请先生成变更预览，再确认提交。');
+      return;
+    }
+    const ticket = preview.ticket;
     setLoading(true);
     setConflicts([]);
     setNotice('');
     try {
-      const result = await api.commit(doc.id, toMapping());
+      const result = await api.commit(doc.id, toMapping(), ticket);
       setDoc(result.document);
       setAnalysis(result.analysis);
       setCommitted(result);
@@ -159,11 +166,19 @@ export default function App() {
       setNotice(`已原子提交：共更新 ${result.changeCount} 处“第X条”。可撤销本次操作。`);
     } catch (e) {
       const err = e as ClientError;
-      setConflicts(
-        err.conflicts.length
-          ? err.conflicts
-          : [{ code: err.code, message: err.message }],
-      );
+      // 凭证过期 / 映射不符 / 已确认过：旧预览立即失效，需重新预览。
+      const ticketCodes = ['PREVIEW_NOT_FOUND', 'PREVIEW_EXPIRED', 'PREVIEW_MAPPING_MISMATCH'];
+      if (ticketCodes.includes(err.code)) {
+        setPreview(null);
+        setNotice(err.message);
+        setConflicts([]);
+      } else {
+        setConflicts(
+          err.conflicts.length
+            ? err.conflicts
+            : [{ code: err.code, message: err.message }],
+        );
+      }
     } finally {
       setLoading(false);
     }
