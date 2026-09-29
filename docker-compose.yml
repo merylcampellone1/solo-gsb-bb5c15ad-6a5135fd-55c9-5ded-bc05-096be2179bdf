@@ -1,0 +1,23 @@
+services:
+  contract-renumber:
+    build: .
+    image: contract-renumber-workbench:latest
+    container_name: contract-renumber
+    ports:
+      - "3000:3000"
+    environment:
+      # SQLite 数据库文件位置（位于持久化卷内）
+      DB_PATH: /data/contract.db
+      PORT: "3000"
+    volumes:
+      - contract-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  contract-data:

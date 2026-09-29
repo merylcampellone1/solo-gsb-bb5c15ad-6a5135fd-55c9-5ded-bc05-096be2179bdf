@@ -1,0 +1,21 @@
+{
+  "name": "contract-renumber-workbench",
+  "version": "1.0.0",
+  "private": true,
+  "description": "合同条款重编号工作台：解析“第X条”定义与引用，批量改号、预览、原子提交、可撤销",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev:server": "npm -w server run dev",
+    "dev:client": "npm -w client run dev",
+    "build": "npm -w client run build",
+    "start": "npm -w server run start",
+    "test": "npm -w server run test",
+    "typecheck": "npm -w server run typecheck && npm -w client run typecheck"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
