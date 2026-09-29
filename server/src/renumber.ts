@@ -122,6 +122,14 @@ export function normalizeMapping(rows: RawRow[]): {
   return { entries, errors };
 }
 
+/**
+ * 规范化映射的稳定序列化：按旧编号排序后输出 JSON。
+ * 预览凭证绑定映射、确认时比对映射都以此为准，不受请求行序影响。
+ */
+export function canonicalMappingJson(entries: MappingEntry[]): string {
+  return JSON.stringify([...entries].sort((a, b) => a.from - b.from));
+}
+
 function snippetAround(text: string, start: number, end: number): string {
   const lineStart = text.lastIndexOf('\n', start - 1) + 1;
   let lineEnd = text.indexOf('\n', end);

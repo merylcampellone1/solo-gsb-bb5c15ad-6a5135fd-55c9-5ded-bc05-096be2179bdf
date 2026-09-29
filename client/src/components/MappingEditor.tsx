@@ -145,9 +145,9 @@ export default function MappingEditor({
           className="btn btn-primary"
           onClick={onCommit}
           disabled={loading || !hasPreview}
-          title={hasPreview ? '' : '请先生成预览'}
+          title={hasPreview ? '凭本次预览凭证原子提交' : '请先生成预览取得凭证'}
         >
-          确认并原子提交
+          {hasPreview ? '凭预览凭证确认并原子提交' : '请先生成预览'}
         </button>
       </div>
     </section>

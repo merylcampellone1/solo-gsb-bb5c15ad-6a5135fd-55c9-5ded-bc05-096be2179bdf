@@ -10,10 +10,19 @@ import {
   updateDocument,
   listDocuments,
   commitRenumber,
+  commitRenumberWithPreview,
+  issueRenumberPreview,
   undoLastRenumber,
+  PreviewRejectedError,
 } from './db';
 import { analyzeText, toAnalyzeDTO } from './parser';
-import { buildPlan, normalizeMapping, type ConflictError, type RawRow } from './renumber';
+import {
+  buildPlan,
+  canonicalMappingJson,
+  normalizeMapping,
+  type ConflictError,
+  type RawRow,
+} from './renumber';
 import {
   analyzeRemoval,
   buildRemovalPlan,
@@ -61,6 +70,19 @@ function planOrConflict(res: express.Response, content: string, rawMapping: unkn
     return null;
   }
   return { entries, plan };
+}
+
+/**
+ * 从改号确认请求中提取预览凭证：接受字符串或 { token } 对象。
+ * 形态非法（非字符串 / 空串）返回 null 并已写出 400。
+ */
+function readCredential(res: express.Response, body: { credential?: unknown }): string | null {
+  const c = body.credential;
+  if (typeof c !== 'string' || !c.trim()) {
+    fail(res, 400, 'BAD_REQUEST', '工作台确认改号必须携带有效的预览凭证 credential，请重新生成预览。');
+    return null;
+  }
+  return c.trim();
 }
 
 /**
@@ -149,46 +171,119 @@ app.put('/api/documents/:id', (req, res) => {
   res.json({ document: doc, analysis: analysisOf(doc.content) });
 });
 
-// 逐处变更预览（只读）。
+// 逐处变更预览：不改正文，但会签发一次性凭证——绑定当前已保存正文的单调修订号
+// （document.revision）与本次规范化映射。凭证随预览结果返回工作台，确认改号必须出示。
 app.post('/api/documents/:id/renumber/preview', (req, res) => {
   const id = Number(req.params.id);
   const doc = requireDoc(res, id);
   if (!doc) return;
   const planned = planOrConflict(res, doc.content, req.body?.mapping);
   if (!planned) return;
+  const { token } = issueRenumberPreview({
+    documentId: id,
+    revision: doc.revision,
+    mappingJson: canonicalMappingJson(planned.entries),
+    newText: planned.plan.newText!,
+    changeCount: planned.plan.changes!.length,
+  });
   res.json({
     mapping: planned.entries,
+    revision: doc.revision,
+    credential: { token, revision: doc.revision },
     changeCount: planned.plan.changes!.length,
     changes: planned.plan.changes,
     previewText: planned.plan.newText,
   });
 });
 
-// 确认提交：历史与正文在同一 SQLite 事务中原子落库。
+// 确认提交改号：
+//   - 工作台（请求带 credential）：在同一 SQLite 事务内核对凭证对应的修订号与映射，
+//     再写正文与撤销历史；凭证过期 / 已消费 / 映射不符一律 409 拒绝并提示重新预览，
+//     两个写入均不发生；同一凭证并发确认至多成功一次。
+//   - 旧客户端（请求只带 mapping、不带 credential）：仍按原有校验、响应与撤销规则工作。
 app.post('/api/documents/:id/renumber/commit', (req, res) => {
   const id = Number(req.params.id);
   const doc = requireDoc(res, id);
   if (!doc) return;
-  const planned = planOrConflict(res, doc.content, req.body?.mapping);
-  if (!planned) return;
-  const { entries, plan } = planned;
+  const body = (req.body ?? {}) as { credential?: unknown; mapping?: unknown };
+  const hasCredential = body.credential !== undefined && body.credential !== null;
 
-  commitRenumber(
-    id,
-    doc.content,
-    plan.newText!,
-    JSON.stringify({ op: 'renumber', mapping: entries }),
-    plan.changes!.length,
-  );
+  if (!hasCredential) {
+    // —— 兼容路径：不带凭证的改号提交，行为与原先完全一致 ——
+    const planned = planOrConflict(res, doc.content, body.mapping);
+    if (!planned) return;
+    const { entries, plan } = planned;
 
-  const updated = getDocument(id)!;
-  res.json({
-    document: updated,
-    mapping: entries,
-    changeCount: plan.changes!.length,
-    changes: plan.changes,
-    analysis: analysisOf(updated.content),
-  });
+    commitRenumber(
+      id,
+      doc.content,
+      plan.newText!,
+      JSON.stringify({ op: 'renumber', mapping: entries }),
+      plan.changes!.length,
+    );
+
+    const updated = getDocument(id)!;
+    res.json({
+      document: updated,
+      mapping: entries,
+      changeCount: plan.changes!.length,
+      changes: plan.changes,
+      analysis: analysisOf(updated.content),
+    });
+    return;
+  }
+
+  // —— 工作台路径：凭凭证确认 ——
+  const token = readCredential(res, body);
+  if (!token) return;
+
+  // 请求体若同时携带 mapping，先规范化为与凭证同样的规范形态，供事务内比对。
+  let expectedMappingJson: string | null = null;
+  if (body.mapping !== undefined && body.mapping !== null) {
+    const normalized = normalizeMapping((body.mapping as RawRow[]) ?? []);
+    if (normalized.errors.length > 0) {
+      return fail(res, 409, 'PREVIEW_MAPPING_MISMATCH', '提交的映射未通过校验，请重新生成预览。', {
+        conflicts: normalized.errors,
+      });
+    }
+    expectedMappingJson = canonicalMappingJson(normalized.entries);
+  }
+
+  try {
+    const result = commitRenumberWithPreview({
+      documentId: id,
+      token,
+      expectedMappingJson,
+      // 事务内执行：以凭证绑定的映射在“当时的已保存正文”上重新构建计划，
+      // 不直接信任预览阶段缓存的 newText。
+      planner: (content, mappingJson) => {
+        const entries = JSON.parse(mappingJson) as { from: number; to: number }[];
+        const plan = buildPlan(content, entries);
+        return plan.ok
+          ? {
+              ok: true,
+              newText: plan.newText!,
+              changeCount: plan.changes!.length,
+              changes: plan.changes,
+              entries,
+            }
+          : { ok: false };
+      },
+    });
+    const updated = getDocument(id)!;
+    res.json({
+      document: updated,
+      mapping: result.mapping,
+      changeCount: result.changeCount,
+      changes: result.changes,
+      analysis: analysisOf(updated.content),
+    });
+  } catch (e) {
+    if (e instanceof PreviewRejectedError) {
+      return fail(res, 409, e.code, e.message);
+    }
+    throw e;
+  }
 });
 
 // ---------- 条款裁撤 ----------

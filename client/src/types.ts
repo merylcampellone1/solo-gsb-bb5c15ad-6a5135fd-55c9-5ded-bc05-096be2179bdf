@@ -44,6 +44,7 @@ export interface DocumentDTO {
   id: number;
   title: string;
   content: string;
+  revision: number;
   created_at: string;
   updated_at: string;
 }
@@ -51,6 +52,12 @@ export interface DocumentDTO {
 export interface MappingEntry {
   from: number;
   to: number;
+}
+
+/** 改号预览凭证：绑定签发时的正文修订号与本次映射，仅可使用一次。 */
+export interface RenumberCredential {
+  token: string;
+  revision: number;
 }
 
 export interface ConflictError {
@@ -74,6 +81,8 @@ export interface ChangeItem {
 
 export interface PreviewResult {
   mapping: MappingEntry[];
+  revision: number;
+  credential: RenumberCredential;
   changeCount: number;
   changes: ChangeItem[];
   previewText: string;

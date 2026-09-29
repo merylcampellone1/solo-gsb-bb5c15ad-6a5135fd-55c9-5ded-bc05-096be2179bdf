@@ -142,11 +142,17 @@ export default function App() {
 
   const doCommit = async () => {
     if (!doc) return;
+    // 工作台确认必须使用预览返回的凭证；映射改动后 preview 已被 changeRows 清空。
+    if (!preview) {
+      setNotice('请先点击“生成变更预览”取得凭证，再确认提交。');
+      return;
+    }
     setLoading(true);
     setConflicts([]);
     setNotice('');
     try {
-      const result = await api.commit(doc.id, toMapping());
+      // 同时回传当前映射：若与凭证绑定的映射不一致，服务端会拒绝并提示重新预览。
+      const result = await api.commit(doc.id, preview.credential.token, toMapping());
       setDoc(result.document);
       setAnalysis(result.analysis);
       setCommitted(result);
@@ -159,6 +165,8 @@ export default function App() {
       setNotice(`已原子提交：共更新 ${result.changeCount} 处“第X条”。可撤销本次操作。`);
     } catch (e) {
       const err = e as ClientError;
+      // 凭证类失败意味着旧预览不可再用：立即作废本地预览，引导用户重新预览。
+      if (err.code.startsWith('PREVIEW_')) setPreview(null);
       setConflicts(
         err.conflicts.length
           ? err.conflicts

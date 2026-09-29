@@ -64,10 +64,17 @@ export const api = {
       body: JSON.stringify({ mapping }),
     });
   },
-  commit(id: number, mapping: { from: number; to: number }[]) {
+  /** 工作台确认改号：必须出示预览返回的一次性凭证（绑定修订号与映射）。 */
+  commit(
+    id: number,
+    credential: string,
+    mapping?: { from: number; to: number }[],
+  ) {
     return request<CommitResult>(`/api/documents/${id}/renumber/commit`, {
       method: 'POST',
-      body: JSON.stringify({ mapping }),
+      body: JSON.stringify(
+        mapping ? { credential, mapping } : { credential },
+      ),
     });
   },
   undo(id: number) {

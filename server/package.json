@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "test": "tsx tests/engine.test.ts && tsx tests/removal.test.ts && tsx tests/diff.test.ts && tsx tests/excerpt.test.ts",
+    "test": "tsx tests/engine.test.ts && tsx tests/removal.test.ts && tsx tests/diff.test.ts && tsx tests/excerpt.test.ts && tsx tests/credential.test.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
